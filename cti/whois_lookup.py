@@ -1,5 +1,6 @@
 """WHOIS domain age and registrar enrichment."""
 import asyncio
+import re
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional
@@ -7,13 +8,28 @@ from typing import Optional
 import whois
 from cti.base import BaseCTIAdapter, CTIResponse
 
+_IP_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+_WHOIS_TIMEOUT = 12.0
+
 
 class WHOISAdapter(BaseCTIAdapter):
     async def lookup(self, url: str) -> CTIResponse:
-        domain = urllib.parse.urlparse(url).netloc.split(":")[0].replace("www.", "")
+        netloc = urllib.parse.urlparse(url).netloc.split(":")[0]
+        domain = netloc.replace("www.", "")
+
+        # Raw IPs have no WHOIS record — treat as maximum risk
+        if _IP_RE.match(domain):
+            return CTIResponse(
+                source="whois", hit=True, score=1.0,
+                details={"domain_age_days": 0, "note": "raw IP address — no registered domain"},
+            )
+
         try:
             loop = asyncio.get_event_loop()
-            w = await loop.run_in_executor(None, whois.whois, domain)
+            w = await asyncio.wait_for(
+                loop.run_in_executor(None, whois.whois, domain),
+                timeout=_WHOIS_TIMEOUT,
+            )
 
             creation = w.creation_date
             if isinstance(creation, list):
@@ -22,13 +38,16 @@ class WHOISAdapter(BaseCTIAdapter):
             age_days: Optional[int] = None
             age_score = 0.0
             if creation:
-                if creation.tzinfo is None:
+                if isinstance(creation, datetime) and creation.tzinfo is None:
                     creation = creation.replace(tzinfo=timezone.utc)
-                age_days = (datetime.now(timezone.utc) - creation).days
-                if age_days < 30:
-                    age_score = 1.0
-                elif age_days < 180:
-                    age_score = 0.5
+                if isinstance(creation, datetime):
+                    age_days = (datetime.now(timezone.utc) - creation).days
+                    if age_days < 30:
+                        age_score = 1.0
+                    elif age_days < 180:
+                        age_score = 0.5
+                    elif age_days < 365:
+                        age_score = 0.2
 
             return CTIResponse(
                 source="whois",
@@ -36,11 +55,14 @@ class WHOISAdapter(BaseCTIAdapter):
                 score=age_score,
                 details={
                     "domain_age_days": age_days,
-                    "registrar": w.registrar,
-                    "creation_date": str(creation),
-                    "expiration_date": str(w.expiration_date),
-                    "country": w.country,
+                    "registrar": getattr(w, "registrar", None),
+                    "creation_date": str(creation) if creation else None,
+                    "expiration_date": str(w.expiration_date) if w.expiration_date else None,
+                    "country": getattr(w, "country", None),
                 },
             )
+        except asyncio.TimeoutError:
+            return CTIResponse(source="whois", hit=False, score=0.0,
+                               details={"error": "WHOIS lookup timed out"})
         except Exception as exc:
             return CTIResponse(source="whois", hit=False, score=0.0, details={}, error=str(exc))
