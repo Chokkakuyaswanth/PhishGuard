@@ -15,11 +15,23 @@ import argparse
 import csv
 import io
 import logging
+import random
 import sys
 import zipfile
 from pathlib import Path
 
 import httpx
+
+# Suffix pool for legit URL augmentation.
+# Weights toward "" so ~30 % stay as bare-domain roots; the rest get a path.
+_LEGIT_PATH_SUFFIXES = [
+    "", "", "", "", "",
+    "/about", "/products", "/services", "/blog", "/news",
+    "/help", "/support", "/contact", "/docs", "/search",
+    "/careers", "/terms", "/privacy", "/faq", "/press",
+    "/about/team", "/products/overview", "/blog/latest",
+    "/help/faq", "/docs/overview", "/docs/getting-started",
+]
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -75,6 +87,7 @@ def fetch_mitchellk(limit: int, client: httpx.Client) -> list[str]:
 
 def fetch_tranco(limit: int, client: httpx.Client) -> list[str]:
     log.info("Fetching Tranco top-1M list…")
+    rng = random.Random(42)
     try:
         resp = client.get(TRANCO_URL, timeout=120, follow_redirects=True)
         resp.raise_for_status()
@@ -85,7 +98,11 @@ def fetch_tranco(limit: int, client: httpx.Client) -> list[str]:
                 urls = []
                 for row in reader:
                     if len(row) >= 2:
-                        urls.append(f"https://{row[1].strip()}")
+                        domain = row[1].strip()
+                        # Augment ~70 % of entries with a path suffix so the model
+                        # sees legitimate URLs at various path depths, not just root.
+                        suffix = rng.choice(_LEGIT_PATH_SUFFIXES)
+                        urls.append(f"https://{domain}{suffix}")
                     if len(urls) >= limit:
                         break
         log.info(f"Tranco: {len(urls)} URLs")

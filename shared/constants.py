@@ -17,11 +17,13 @@ FEATURE_ORDER = [
 HIGH_RISK_TLDS = frozenset([
     ".xyz", ".tk", ".ml", ".ga", ".cf", ".gq", ".pw", ".top",
     ".club", ".work", ".click", ".link", ".party", ".download",
+    # Commonly abused new gTLDs
+    ".shop", ".store", ".online", ".site", ".icu", ".vip",
+    ".buzz", ".cam", ".cyou", ".fun", ".monster", ".uno",
 ])
 
 SUSPICIOUS_KEYWORDS = frozenset([
     "login", "signin", "secure", "verify", "account", "update",
-    "banking", "paypal", "ebay", "amazon", "apple", "microsoft",
-    "password", "credential", "authenticate", "confirm", "wallet",
+    "banking", "password", "credential", "authenticate", "confirm", "wallet",
     "suspended", "unusual", "alert", "notification",
 ])

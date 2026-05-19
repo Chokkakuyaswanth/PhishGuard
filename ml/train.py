@@ -69,8 +69,10 @@ def load_url_csv(path: Path) -> tuple[np.ndarray, np.ndarray] | tuple[None, None
 def generate_synthetic_data(n: int = 12_000) -> tuple[np.ndarray, np.ndarray]:
     """
     Synthetic feature vectors calibrated to FEATURE_ORDER distributions.
-    Legitimate: short HTTPS URLs with low entropy.
+    Legitimate: varied-depth HTTPS URLs, low entropy, no risky signals.
     Phishing: long HTTP URLs, high entropy, suspicious keywords, risky TLDs.
+    Per-feature std used so binary features stay near {0,1} and continuous
+    features get realistic variance.
     """
     log.info("Generating synthetic training data…")
     rng = np.random.default_rng(42)
@@ -84,11 +86,14 @@ def generate_synthetic_data(n: int = 12_000) -> tuple[np.ndarray, np.ndarray]:
     # is_punycode, tilde_in_path, hex_in_domain, redirect_double_slash,
     # domain_digit_count, url_shortener_flag, brand_count,
     # num_dots_in_path, query_length, fragment_present, multi_subdomain
-    legit_means = [45, 12, 0, 0, 1, 3, 0, 0, 1, 0.05, 3.5, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0]
-    phish_means = [95, 28, 2, 0.3, 0.2, 7, 2, 0.5, 7, 0.25, 4.8, 3, 0.2, 0.4, 4, 2, 0.6, 0.3, 0.2, 0.1, 0.1, 0.2, 0.3, 4, 0.2, 1, 2, 25, 0.1, 0.6]
+    legit_means = [40,  12, 0,   0,   1,   3,  0,   0,   1,   0.05, 3.5, 0,   0,   0,   2,  1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,  15,  0,   0  ]
+    phish_means = [95,  28, 2,   0.3, 0.2, 7,  2,   0.5, 7,   0.25, 4.8, 3,   0.2, 0.4, 3,  2,   0.6, 0.3, 0.2, 0.1, 0.1, 0.2, 0.3, 4,   0.2, 0.8, 2,  30,  0.1, 0.6]
+    # Per-feature std — binary/rate features get small std; continuous get larger
+    legit_std  = [15,   5, 0.3, 0.1, 0.1, 1,  0.3, 0.1, 1,   0.05, 0.4, 0.2, 0.1, 0.1, 1.5,0.8, 0.1, 0.05,0.05,0.05,0.05,0.05,0.05,1,   0.1, 0.2, 0.8,10,  0.05,0.2 ]
+    phish_std  = [25,   8, 1,   0.3, 0.3, 2,  1,   0.3, 3,   0.1,  0.5, 1,   0.3, 0.4, 1.5,1,   0.3, 0.2, 0.2, 0.2, 0.2, 0.3, 0.3, 2,   0.3, 0.4, 1,  15,  0.2, 0.4 ]
 
-    legit_X = rng.normal(loc=legit_means, scale=8, size=(half, 30)).clip(0)
-    phish_X = rng.normal(loc=phish_means, scale=12, size=(half, 30)).clip(0)
+    legit_X = rng.normal(loc=legit_means, scale=legit_std, size=(half, 30)).clip(0)
+    phish_X = rng.normal(loc=phish_means, scale=phish_std, size=(half, 30)).clip(0)
 
     X = np.vstack([legit_X, phish_X])
     y = np.concatenate([np.zeros(half), np.ones(half)])

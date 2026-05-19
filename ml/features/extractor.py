@@ -16,8 +16,7 @@ URL_SHORTENERS = frozenset([
 
 SUSPICIOUS_KEYWORDS = frozenset([
     "login", "signin", "secure", "verify", "account", "update",
-    "banking", "paypal", "ebay", "amazon", "apple", "microsoft",
-    "password", "credential", "authenticate", "confirm", "wallet",
+    "banking", "password", "credential", "authenticate", "confirm", "wallet",
     "suspended", "unusual", "alert", "notification",
 ])
 
@@ -25,6 +24,9 @@ HIGH_RISK_TLDS = frozenset([
     ".xyz", ".tk", ".ml", ".ga", ".cf", ".gq", ".pw", ".top",
     ".club", ".work", ".click", ".link", ".party", ".download",
     ".zip", ".mov", ".phishing",
+    # Commonly abused new gTLDs not in the original list
+    ".shop", ".store", ".online", ".site", ".icu", ".vip",
+    ".buzz", ".cam", ".cyou", ".fun", ".monster", ".uno",
 ])
 
 IMPERSONATED_BRANDS = frozenset([
@@ -79,7 +81,7 @@ class URLFeatureExtractor:
             "at_sign_count": url.count("@"),
             "special_char_count": sum(url.count(c) for c in ("@", "?", "%", "+", "=")),
             "digit_ratio": round(digits_in_domain / len(domain), 4) if domain else 0.0,
-            "entropy": round(_shannon_entropy(url), 4),
+            "entropy": round(_shannon_entropy(domain), 4),
             "suspicious_keywords": sum(kw in full for kw in SUSPICIOUS_KEYWORDS),
             "is_url_shortener": domain in URL_SHORTENERS,
             "tld_risk": 1.0 if tld in HIGH_RISK_TLDS else 0.0,
