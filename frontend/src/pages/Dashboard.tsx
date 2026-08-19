@@ -1,32 +1,35 @@
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { ArrowRight, ShieldCheck, Search, ScanLine } from 'lucide-react'
-import { fetchHistory, type ScanResult } from '../api'
+import { ArrowRight, ShieldCheck, Search, ScanLine, PieChart } from 'lucide-react'
+import RiskDistChart from '../components/RiskDistChart'
+import { fetchHistory, fetchStats, type ScanResult, type ScanStats } from '../api'
+
+const EMPTY_STATS: ScanStats = {
+  total: 0,
+  by_level: { no_threat_detected: 0, safe: 0, suspicious: 0, malicious: 0 },
+}
 
 export default function Dashboard() {
   const [recentScans, setRecentScans] = useState<ScanResult[]>([])
-  const [summary, setSummary] = useState({ total: 0, suspicious: 0, malicious: 0 })
+  // Counts come from /stats, not from the recent-activity page — deriving them
+  // from the last five scans understates every tile on the dashboard.
+  const [stats, setStats] = useState<ScanStats>(EMPTY_STATS)
 
   useEffect(() => {
     let cancelled = false
 
-    fetchHistory(5)
-      .then((items) => {
+    Promise.all([fetchHistory(5), fetchStats()])
+      .then(([items, scanStats]) => {
         if (cancelled) {
           return
         }
-
         setRecentScans(items)
-        setSummary({
-          total: items.length,
-          suspicious: items.filter((item) => item.level === 'suspicious').length,
-          malicious: items.filter((item) => item.level === 'malicious').length,
-        })
+        setStats(scanStats)
       })
       .catch(() => {
         if (!cancelled) {
           setRecentScans([])
-          setSummary({ total: 0, suspicious: 0, malicious: 0 })
+          setStats(EMPTY_STATS)
         }
       })
 
@@ -52,24 +55,33 @@ export default function Dashboard() {
       <div className="grid gap-4 md:grid-cols-3">
         <div className="rounded-2xl border border-soc-border bg-soc-surface p-6">
           <div className="text-xs uppercase tracking-[0.2em] text-soc-muted">Scans</div>
-          <div className="mt-3 text-3xl font-semibold text-soc-text">{summary.total}</div>
-          <div className="mt-2 text-sm text-soc-muted">Latest scan activity loaded from the backend.</div>
+          <div className="mt-3 text-3xl font-semibold text-soc-text">{stats.total}</div>
+          <div className="mt-2 text-sm text-soc-muted">Every scan recorded by the backend.</div>
         </div>
 
         <div className="rounded-2xl border border-soc-border bg-soc-surface p-6">
           <div className="text-xs uppercase tracking-[0.2em] text-soc-muted">Suspicious</div>
-          <div className="mt-3 text-3xl font-semibold text-soc-text">{summary.suspicious}</div>
+          <div className="mt-3 text-3xl font-semibold text-soc-text">{stats.by_level.suspicious}</div>
           <div className="mt-2 text-sm text-soc-muted">URLs flagged with a suspicious risk level.</div>
         </div>
 
         <div className="rounded-2xl border border-soc-border bg-soc-surface p-6">
           <div className="text-xs uppercase tracking-[0.2em] text-soc-muted">Malicious</div>
-          <div className="mt-3 text-3xl font-semibold text-soc-text">{summary.malicious}</div>
+          <div className="mt-3 text-3xl font-semibold text-soc-text">{stats.by_level.malicious}</div>
           <div className="mt-2 text-sm text-soc-muted">High-confidence detections from the scan pipeline.</div>
         </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-2xl border border-soc-border bg-soc-surface p-6">
+          <div className="flex items-center gap-2 text-soc-accent">
+            <PieChart className="h-4 w-4" />
+            <h2 className="font-medium">Risk distribution</h2>
+          </div>
+          <p className="mt-2 text-sm text-soc-muted">Verdict breakdown across all {stats.total} recorded scans.</p>
+          <RiskDistChart stats={stats} />
+        </div>
+
         <div className="rounded-2xl border border-soc-border bg-soc-surface p-6">
           <div className="flex items-center gap-2 text-soc-accent">
             <Search className="h-4 w-4" />

@@ -23,16 +23,18 @@ from cti.base import CTIStatus  # noqa: E402
 
 
 async def orchestrate_scan(request: ScanRequest, session: AsyncSession) -> ScanResult:
-    url = normalize_url(request.url)
+    raw_url = request.url.strip()
+    url = normalize_url(raw_url)
 
-    # 1. Feature extraction
-    features, vector = extract(url)
+    # 1. Feature extraction — the extractor normalizes internally and reads
+    #    obfuscation signals off the raw URL, so it must be handed the raw form.
+    features, vector = extract(raw_url)
 
     # 2. ML inference
     ml_prob = MLService.predict(vector)
 
     # 3. Parallel CTI enrichment
-    cti_responses = await enrich(url)
+    cti_responses = await enrich(url, request.source)
 
     # 4. Deterministic decision layer
     decision = DecisionEngine.decide(
@@ -134,6 +136,7 @@ def _build_cti_result(cti_responses) -> CTIResult:
         virustotal=provider_map.get("virustotal"),
         urlhaus=provider_map.get("urlhaus"),
         whois=provider_map.get("whois"),
+        dns=provider_map.get("dns"),
         enriched=any(
             evidence is not None and evidence.status in {ProviderStatus.LIVE, ProviderStatus.MOCK}
             for evidence in provider_map.values()

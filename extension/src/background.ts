@@ -1,4 +1,5 @@
 import { scanUrl } from './api'
+import type { StoredScan } from './api'
 
 type BadgeLevel = 'no_threat_detected' | 'safe' | 'suspicious' | 'malicious' | 'unknown' | 'pending'
 
@@ -29,22 +30,36 @@ chrome.webNavigation.onCompleted.addListener(async ({ tabId, url, frameId }) => 
   // Only process top-level navigations to http(s) pages
   if (frameId !== 0 || !url.startsWith('http')) return
 
+  // Clock the span the user actually waits: navigation event → badge painted.
+  const startedAt = performance.now()
+
   setBadge(tabId, 'pending')
   // Signal popup that a scan is in progress for this tab
   await chrome.storage.local.set({ [`scan_${tabId}`]: { pending: true, url } })
 
-  const result = await scanUrl(url)
+  const outcome = await scanUrl(url)
 
-  if (!result) {
+  if (!outcome) {
     setBadge(tabId, 'unknown')
     await chrome.storage.local.remove(`scan_${tabId}`)
     return
   }
 
+  const { result, fetchMs, cached } = outcome
   setBadge(tabId, result.verdict as BadgeLevel)
 
+  const totalMs = Math.round(performance.now() - startedAt)
+  const stored: StoredScan = {
+    ...result,
+    timing: { total_ms: totalMs, fetch_ms: fetchMs, cached },
+  }
+  console.debug(
+    `[PhishGuard] ${result.verdict} in ${totalMs} ms ` +
+    `(${cached ? 'cache hit' : `network ${fetchMs} ms`}) — ${url}`
+  )
+
   // Persist so popup can read it without re-scanning
-  await chrome.storage.local.set({ [`scan_${tabId}`]: result })
+  await chrome.storage.local.set({ [`scan_${tabId}`]: stored })
 
   if (result.verdict === 'malicious') {
     chrome.notifications.create(`phishguard_${tabId}_${Date.now()}`, {

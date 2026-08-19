@@ -22,16 +22,55 @@ from pathlib import Path
 
 import httpx
 
-# Suffix pool for legit URL augmentation.
-# Weights toward "" so ~30 % stay as bare-domain roots; the rest get a path.
-_LEGIT_PATH_SUFFIXES = [
-    "", "", "", "", "",
-    "/about", "/products", "/services", "/blog", "/news",
-    "/help", "/support", "/contact", "/docs", "/search",
-    "/careers", "/terms", "/privacy", "/faq", "/press",
-    "/about/team", "/products/overview", "/blog/latest",
-    "/help/faq", "/docs/overview", "/docs/getting-started",
+# Legitimate URL augmentation.
+#
+# Tranco ships bare domains. Training on those alone leaves the legitimate half
+# with no query strings, no dots in the path, and nothing deeper than two
+# segments — so the model learns "long, deep, or parameterised ⇒ phishing" and
+# flags ordinary sites like docs.python.org/3/library/asyncio.html. These pools
+# reproduce the shapes real sites actually serve, not the shapes of any
+# particular test URL.
+_LEGIT_SUBDOMAINS = ["", "", "", "", "", "www.", "www.", "docs.", "blog.", "support.", "shop.", "news."]
+
+_LEGIT_PATH_SEGMENTS = [
+    "about", "products", "services", "blog", "news", "help", "support",
+    "contact", "docs", "search", "careers", "terms", "privacy", "faq",
+    "press", "team", "overview", "getting-started", "pricing", "features",
+    "guide", "reference", "library", "tutorial", "downloads", "community",
+    "2024", "2025", "en", "en-us", "category", "article", "post", "product",
 ]
+
+_LEGIT_FILE_NAMES = [
+    "index.html", "overview.html", "asyncio.html", "readme.md", "guide.pdf",
+    "changelog.txt", "getting-started.html", "faq.html", "api.json",
+]
+
+_LEGIT_QUERIES = [
+    "", "", "", "", "",
+    "?q=example", "?page=2", "?lang=en", "?id=1042", "?ref=nav",
+    "?utm_source=newsletter&utm_medium=email", "?q=how+to+parse+a+url&page=3",
+    "?category=books&sort=price&order=asc",
+]
+
+
+def _augment_legit(domain: str, rng: random.Random) -> str:
+    """Build a plausible full URL for a bare Tranco domain."""
+    host = rng.choice(_LEGIT_SUBDOMAINS) + domain
+
+    shape = rng.random()
+    if shape < 0.22:
+        path = ""
+    elif shape < 0.50:
+        path = "/" + rng.choice(_LEGIT_PATH_SEGMENTS)
+    elif shape < 0.75:
+        path = "/" + "/".join(rng.sample(_LEGIT_PATH_SEGMENTS, 2))
+    elif shape < 0.90:
+        path = "/" + "/".join(rng.sample(_LEGIT_PATH_SEGMENTS, 3))
+    else:
+        path = "/" + "/".join(rng.sample(_LEGIT_PATH_SEGMENTS, 2)) + "/" + rng.choice(_LEGIT_FILE_NAMES)
+
+    return f"https://{host}{path}{rng.choice(_LEGIT_QUERIES) if path else ''}"
+
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -98,11 +137,7 @@ def fetch_tranco(limit: int, client: httpx.Client) -> list[str]:
                 urls = []
                 for row in reader:
                     if len(row) >= 2:
-                        domain = row[1].strip()
-                        # Augment ~70 % of entries with a path suffix so the model
-                        # sees legitimate URLs at various path depths, not just root.
-                        suffix = rng.choice(_LEGIT_PATH_SUFFIXES)
-                        urls.append(f"https://{domain}{suffix}")
+                        urls.append(_augment_legit(row[1].strip(), rng))
                     if len(urls) >= limit:
                         break
         log.info(f"Tranco: {len(urls)} URLs")

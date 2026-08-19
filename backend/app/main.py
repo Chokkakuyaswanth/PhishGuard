@@ -1,16 +1,30 @@
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.db.database import init_db
 from app.routers import health, scan, history, export
+from app.services.ml_service import MLService
+from cti.http_client import aclose as close_cti_client, warmup as warm_cti_client
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Load eagerly: a lazy first predict costs ~2.8 s, which the extension
+    # would pay on the user's first navigation after every restart.
+    MLService.load()
+    await warm_cti_client()
     yield
+    await close_cti_client()
 
 
 app = FastAPI(

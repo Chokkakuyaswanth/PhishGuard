@@ -1,8 +1,18 @@
-import joblib
-import numpy as np
+import sys
 from pathlib import Path
 
+import joblib
+import numpy as np
+
 from app.config import settings
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from ml.features.extractor import FEATURE_ORDER  # noqa: E402
+
+_FALLBACK_THRESHOLDS = {"suspicious": 0.7679, "malicious": 0.985}
 
 
 class MLService:
@@ -17,14 +27,21 @@ class MLService:
             )
         loaded = joblib.load(path)
         if isinstance(loaded, dict) and "base_model" in loaded:
-            cls._bundle = loaded
+            bundle = loaded
         else:
-            cls._bundle = {
-                "base_model": loaded,
-                "combiner": None,
-                "thresholds": {"safe": 0.25, "suspicious": 0.60},
-            }
-        cls._prepare_for_inference(cls._bundle)
+            bundle = {"base_model": loaded, "calibrator": None, "thresholds": dict(_FALLBACK_THRESHOLDS)}
+
+        # A stale artifact silently mismatched against FEATURE_ORDER would score
+        # every URL against the wrong columns, so refuse to serve it.
+        trained_order = bundle.get("feature_order")
+        if trained_order and list(trained_order) != list(FEATURE_ORDER):
+            raise RuntimeError(
+                f"Model at {path} was trained on {len(trained_order)} features but the extractor "
+                f"produces {len(FEATURE_ORDER)}. Retrain with: python ml/train.py"
+            )
+
+        cls._prepare_for_inference(bundle)
+        cls._bundle = bundle
 
     @classmethod
     def _prepare_for_inference(cls, node) -> None:
@@ -61,11 +78,13 @@ class MLService:
 
     @classmethod
     def predict(cls, feature_vector: np.ndarray) -> float:
+        """Calibrated phishing probability — the same scale the thresholds were picked on."""
         if cls._bundle is None:
             cls.load()
-        base_model = cls._bundle["base_model"]
-        prob: float = base_model.predict_proba(feature_vector.reshape(1, -1))[0][1]
-        return round(float(prob), 4)
+        raw = cls._bundle["base_model"].predict_proba(feature_vector.reshape(1, -1))[0][1]
+        calibrator = cls._bundle.get("calibrator")
+        score = float(calibrator.predict([raw])[0]) if calibrator is not None else float(raw)
+        return round(min(max(score, 0.0), 1.0), 4)
 
     @classmethod
     def is_loaded(cls) -> bool:
@@ -85,25 +104,13 @@ class MLService:
             return dict(cls._bundle["decision_thresholds"])
 
         learned = dict(cls._bundle.get("thresholds", {}))
-        suspicious_threshold = float(learned.get("suspicious", 0.7679))
         return {
-            "suspicious": suspicious_threshold,
-            "malicious": float(learned.get("malicious", 0.985)),
+            "suspicious": float(learned.get("suspicious", _FALLBACK_THRESHOLDS["suspicious"])),
+            "malicious": float(learned.get("malicious", _FALLBACK_THRESHOLDS["malicious"])),
         }
-
-    @classmethod
-    def combine_scores(cls, ml_probability: float, cti_scores: dict[str, float]) -> float:
-        if cls._bundle is None:
-            cls.load()
-        combiner = cls._bundle["combiner"]
-        if combiner is None:
-            return round(min(max(float(ml_probability), 0.0), 1.0), 4)
-        row = np.array([[ml_probability, cti_scores.get("virustotal", 0.0), cti_scores.get("urlhaus", 0.0), cti_scores.get("whois", 0.0)]], dtype=float)
-        score = float(combiner.predict_proba(row)[0][1])
-        return round(min(max(score, 0.0), 1.0), 4)
 
     @classmethod
     def thresholds(cls) -> dict[str, float]:
         if cls._bundle is None:
             cls.load()
-        return dict(cls._bundle.get("thresholds", {"safe": 0.25, "suspicious": 0.60}))
+        return dict(cls._bundle.get("thresholds", _FALLBACK_THRESHOLDS))

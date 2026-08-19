@@ -26,6 +26,7 @@ export type CtiEvidence = {
   virustotal?: ProviderEvidence | null
   urlhaus?: ProviderEvidence | null
   whois?: ProviderEvidence | null
+  dns?: ProviderEvidence | null
   enriched: boolean
 }
 
@@ -73,6 +74,16 @@ export async function fetchHistory(limit = 25, offset = 0): Promise<ScanResult[]
   const response = await client.get<ScanResult[]>('/history', {
     params: { limit, offset },
   })
+  return response.data
+}
+
+export type ScanStats = {
+  total: number
+  by_level: Record<RiskLevel, number>
+}
+
+export async function fetchStats(): Promise<ScanStats> {
+  const response = await client.get<ScanStats>('/stats')
   return response.data
 }
 

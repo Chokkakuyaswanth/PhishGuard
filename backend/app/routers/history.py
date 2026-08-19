@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from typing import Any, Dict, List
 
 from app.db.database import get_session
 from app.models.scan import ScanResult
@@ -17,3 +17,11 @@ async def get_history(
 ) -> List[ScanResult]:
     svc = DBService(session)
     return await svc.get_history(limit=limit, offset=offset)
+
+
+@router.get("/stats")
+async def get_stats(
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    svc = DBService(session)
+    return await svc.get_stats()

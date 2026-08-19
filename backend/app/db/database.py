@@ -4,7 +4,7 @@ Database engine, ORM models, and session factory.
 Swap DATABASE_URL in .env to move from SQLite → PostgreSQL.
 No dialect-specific SQL anywhere — all ORM.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Float, DateTime, Text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -32,8 +32,15 @@ class ScanRecord(Base):
     explanation_json: Mapped[str] = mapped_column(Text, default="[]")
     cti_json: Mapped[str] = mapped_column(Text, default="{}")
     features_json: Mapped[str] = mapped_column(Text, default="{}")
+    scan_mode: Mapped[str] = mapped_column(String(20), default="ml_only")
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    thresholds_json: Mapped[str] = mapped_column(Text, default="{}")
     source: Mapped[str] = mapped_column(String(20), default="api")
-    scanned_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # timezone=True keeps tz-aware values intact on the promised Postgres swap;
+    # a naive column silently drops the offset on SQLite and errors on asyncpg.
+    scanned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 engine = create_async_engine(settings.database_url, echo=False)

@@ -2,7 +2,7 @@
 
 ****ML-powered phishing URL detection with real-time CTI enrichment, FastAPI backend, SOC dashboard, and Chrome extension.****
 
-PhishGuard is a full-stack security tool built for SOC analysts. It combines a 30-feature URL classifier (XGBoost + RandomForest ensemble) with live threat intelligence enrichment from VirusTotal, URLhaus, and WHOIS to produce a weighted risk score for any URL — in under a second.
+PhishGuard is a full-stack security tool built for SOC analysts. It combines a 35-feature URL classifier (XGBoost + RandomForest ensemble, isotonic-calibrated) with live threat intelligence enrichment from VirusTotal, URLhaus, DNS, and WHOIS to produce a risk verdict for any URL — inside a bounded latency budget.
 
 ---
 
@@ -23,13 +23,49 @@ PhishGuard is a full-stack security tool built for SOC analysts. It combines a 3
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-****Weighted risk score:****  `score = 0.40·ML + 0.30·VT + 0.20·URLhaus + 0.10·WHOIS`
+****Decision policy.**** There is no fixed weighted sum. `DecisionEngine` takes the
+calibrated ML probability and uses CTI as corroborating evidence, so a verdict is
+never stronger than the evidence behind it:
 
-| Score | Level |
+| Condition | Verdict |
 |---|---|
-| < 0.30 | Safe |
-| 0.30 – 0.65 | Suspicious |
-| ≥ 0.65 | Malicious |
+| Live VirusTotal or URLhaus hit | Malicious (risk >= 0.97) |
+| ML >= malicious threshold | Malicious (risk >= 0.80; 0.90 in full mode) |
+| ML >= suspicious threshold, or live WHOIS/DNS hit | Suspicious (risk 0.40 - 0.79) |
+| Otherwise | No threat detected (risk < 0.40) |
+
+Both thresholds are learned at training time on a held-out fold and stored in the
+model bundle - see `ml/data/processed/metrics.json`. Every response carries a
+`scan_mode` (`full` / `degraded` / `ml_only` / `failed`) recording how much live
+CTI backed the verdict.
+
+****Latency budget.**** CTI enrichment is capped by a wall-clock budget; providers
+that miss it are reported as `timeout` rather than delaying the response.
+Requests with `source: "extension"` get a tighter budget so browser navigation
+stays under the 500 ms target, while the dashboard waits for full enrichment.
+
+Measured on the reference machine with `python scripts/bench_latency.py`
+(16 scans per source, warm; p50 / p95):
+
+| Source | `CTI_MOCK=true` | `CTI_MOCK=false` (live CTI) |
+|---|---|---|
+| `extension` | 54 / 82 ms | **362 / 369 ms** |
+| `dashboard` | 55 / 63 ms | 1839 / 2580 ms |
+
+The browser path meets the sub-500 ms goal with live threat intelligence
+enabled. The gap between the two sources is deliberate: WHOIS alone averages
+~1.9 s, so the extension takes the DNS result (~1 ms) plus the model verdict and
+reports the slower providers as `timeout`, while the dashboard waits them out.
+
+The extension records its own end-to-end time — navigation event through badge
+update, which includes Chrome's dispatch and the session-cache lookup that
+`scripts/bench_latency.py` cannot see. It is shown in the popup as ****Response****
+and logged per scan:
+
+```text
+[PhishGuard] malicious in 371 ms (network 366 ms) — http://paypa1-secure-login.xyz/…
+[PhishGuard] no_threat_detected in 3 ms (cache hit) — https://github.com/…
+```
 
 ---
 
@@ -226,6 +262,8 @@ Key settings in `.env`:
 | `CTI_MOCK` | `true` | Set to `false` and add `VIRUSTOTAL_API_KEY` for live enrichment |
 | `VIRUSTOTAL_API_KEY` | *(empty)* | VirusTotal API key |
 | `ML_MODEL_PATH` | `ml/models/artifacts/phishguard_model.joblib` | Path to trained model |
+| `CTI_BUDGET_MS` | `2500` | Wall-clock cap on CTI enrichment for API/dashboard scans |
+| `CTI_BUDGET_EXTENSION_MS` | `300` | Tighter cap for `source: "extension"` scans |
 | `CORS_ORIGINS` | `["http://localhost:5173","http://localhost:3000"]` | JSON array |
 
 ---
@@ -426,7 +464,7 @@ The feature extractor (`ml/features/extractor.py`) computes these for every URL 
 
 ****Ensemble:**** Soft-voting classifier — XGBoost (300 estimators, depth 6) + RandomForest (200 estimators, depth 10) — wrapped in a `StandardScaler` pipeline.
 
-****Training data:**** Synthetic feature vectors calibrated to real phishing/legitimate URL distributions across all 30 features. To use a real URL dataset, supply `ml/data/raw/labeled_urls.csv` (columns: `url`, `label`).
+****Training data:**** Run `python ml/data/download_dataset.py` to build a live corpus from PhishTank plus Tranco. Synthetic vectors across all 35 features are used only as a fallback. To use a real URL dataset, supply `ml/data/raw/labeled_urls.csv` (columns: `url`, `label`).
 
 | Metric | Score |
 |---|---|
@@ -501,8 +539,9 @@ Test coverage:
 
 | Suite | Tests | Scope |
 |---|---:|---|
-| `test_feature_extractor.py` | 31 | All 30 features, vector shape, edge cases |
-| `test_risk_scorer.py` | 16 | Weight math, thresholds, explanation bullets |
+| `test_feature_extractor.py` | 42 | All 35 features, normalization consistency, edge cases |
+| `test_decision_engine.py` | 22 | Verdict policy, scan modes, explanation bullets |
+| `test_cti_budget.py` | 6 | Latency budget, provider timeouts and failures |
 | `test_signals.py` | 20 | Obfuscation, URL decoding, Levenshtein, typosquatting |
 | `test_api.py` | 13 | All endpoints (health, scan, history, export, 422 validation) |
 | `RiskBadge.test.tsx` | 10 | All 4 risk levels, score display, Tailwind classes |

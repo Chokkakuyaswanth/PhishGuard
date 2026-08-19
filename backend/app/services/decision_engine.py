@@ -42,6 +42,9 @@ class DecisionEngine:
         live_whois_hit = by_source.get("whois") is not None and (
             by_source["whois"].status == CTIStatus.LIVE and by_source["whois"].hit is True
         )
+        live_dns_hit = by_source.get("dns") is not None and (
+            by_source["dns"].status == CTIStatus.LIVE and by_source["dns"].hit is True
+        )
 
         statuses = [result.status for result in by_source.values()]
         if not statuses:
@@ -53,14 +56,16 @@ class DecisionEngine:
         else:
             scan_mode = ScanMode.DEGRADED
 
-        # Be conservative unless live CTI corroborates the detection.
+        # Live CTI corroboration is the strongest signal, but a high-confidence
+        # model verdict must still be able to reach MALICIOUS on its own —
+        # otherwise no scan can ever exceed SUSPICIOUS while CTI is mocked.
         if live_confirmed_hit:
             risk_score = max(score, 0.97)
             verdict = RiskLevel.MALICIOUS
-        elif scan_mode == ScanMode.FULL and score >= malicious_threshold:
-            risk_score = max(score, 0.9)
+        elif score >= malicious_threshold:
+            risk_score = max(score, 0.9) if scan_mode == ScanMode.FULL else max(score, 0.8)
             verdict = RiskLevel.MALICIOUS
-        elif score >= suspicious_threshold or live_whois_hit:
+        elif score >= suspicious_threshold or live_whois_hit or live_dns_hit:
             risk_score = _map_suspicious_risk(score, suspicious_threshold)
             verdict = RiskLevel.SUSPICIOUS
         else:
@@ -87,6 +92,12 @@ class DecisionEngine:
         elif uh and uh.status != CTIStatus.LIVE:
             explanation.append(f"URLhaus status: {uh.status.value}")
 
+        dns = by_source.get("dns")
+        if dns and dns.status == CTIStatus.LIVE and dns.hit:
+            explanation.append("Domain does not resolve in DNS")
+        elif dns and dns.status != CTIStatus.LIVE:
+            explanation.append(f"DNS status: {dns.status.value}")
+
         whois = by_source.get("whois")
         if whois and whois.status == CTIStatus.LIVE and whois.hit:
             age = whois.details.get("domain_age_days", "?")
@@ -94,8 +105,10 @@ class DecisionEngine:
         elif whois and whois.status != CTIStatus.LIVE:
             explanation.append(f"WHOIS status: {whois.status.value}")
 
-        if scan_mode != ScanMode.FULL and not live_confirmed_hit and verdict != RiskLevel.MALICIOUS:
-            explanation.append("Final verdict was limited because CTI corroboration was unavailable or non-live")
+        if scan_mode != ScanMode.FULL and not live_confirmed_hit:
+            explanation.append(
+                "Verdict rests on the model alone — live CTI corroboration was unavailable"
+            )
 
         return DecisionOutcome(
             risk_score=round(risk_score, 4),

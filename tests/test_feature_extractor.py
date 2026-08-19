@@ -1,4 +1,4 @@
-"""Tests for URLFeatureExtractor — all 30 features, edge cases, and vector shape."""
+"""Tests for URLFeatureExtractor — all 35 features, edge cases, and vector shape."""
 import sys
 from pathlib import Path
 
@@ -16,12 +16,12 @@ def extractor():
 
 
 class TestVectorShape:
-    def test_returns_30_features(self, extractor):
+    def test_returns_35_features(self, extractor):
         vec = extractor.to_vector(extractor.extract("https://example.com"))
-        assert vec.shape == (30,)
+        assert vec.shape == (35,)
 
-    def test_feature_order_has_30_entries(self):
-        assert len(FEATURE_ORDER) == 30
+    def test_feature_order_has_35_entries(self):
+        assert len(FEATURE_ORDER) == 35
 
     def test_feature_keys_match_order(self, extractor):
         feats = extractor.extract("https://example.com/path")
@@ -95,9 +95,13 @@ class TestSuspiciousSignals:
         assert feats["is_url_shortener"] is True
         assert feats["url_shortener_flag"] == 1
 
-    def test_at_sign_count(self, extractor):
-        feats = extractor.extract("http://user@evil.com/page")
-        assert feats["at_sign_count"] == 1
+    def test_at_sign_misdirect_survives_normalization(self, extractor):
+        # Normalization drops the userinfo, so at_sign_count cannot carry this
+        # signal any more — has_at_misdirect reads it off the raw URL instead.
+        feats = extractor.extract("http://legit-bank.com@evil.com/page")
+        assert feats["at_sign_count"] == 0
+        assert feats["has_at_misdirect"] is True
+        assert feats["obfuscation_signal_count"] >= 1
 
     def test_encoded_chars_detected(self, extractor):
         feats = extractor.extract("http://example.com/path%20with%20spaces")
@@ -142,3 +146,43 @@ class TestEntropyAndDigits:
         feats = extractor.extract("https://example.com/?q=hello&x=1")
         assert feats["query_length"] == len("q=hello&x=1")
         assert feats["query_param_count"] == 2
+
+
+class TestObfuscationAndTyposquatFeatures:
+    def test_clean_url_has_no_obfuscation_signals(self, extractor):
+        feats = extractor.extract("https://github.com/torvalds/linux")
+        assert feats["obfuscation_signal_count"] == 0
+        assert feats["has_at_misdirect"] is False
+        assert feats["decode_changed_url"] is False
+
+    def test_percent_encoding_flags_decode_change(self, extractor):
+        feats = extractor.extract("http://evil.com/path%20with%20space")
+        assert feats["decode_changed_url"] is True
+        assert feats["obfuscation_signal_count"] >= 1
+
+    def test_typosquat_domain_detected(self, extractor):
+        feats = extractor.extract("http://paypa1.com/login")
+        assert feats["is_typosquatting"] is True
+        assert feats["typosquat_distance"] <= 2
+
+    def test_real_brand_is_not_typosquatting(self, extractor):
+        feats = extractor.extract("https://paypal.com/signin")
+        assert feats["is_typosquatting"] is False
+        assert feats["typosquat_distance"] == 0
+
+    def test_unrelated_domain_distance_is_capped(self, extractor):
+        feats = extractor.extract("https://docs.python.org/3/library/asyncio.html")
+        assert feats["is_typosquatting"] is False
+        assert feats["typosquat_distance"] == 10
+
+
+class TestNormalizationConsistency:
+    def test_default_port_does_not_change_features(self, extractor):
+        bare = extractor.extract("https://example.com/path")
+        ported = extractor.extract("https://example.com:443/path")
+        assert bare == ported
+
+    def test_host_case_does_not_change_features(self, extractor):
+        lower = extractor.extract("https://example.com/Path")
+        upper = extractor.extract("https://EXAMPLE.COM/Path")
+        assert lower == upper

@@ -1,11 +1,21 @@
-"""URL feature extraction — 30 lexical + structural features used by the classifier."""
+"""URL feature extraction — 35 lexical, structural, obfuscation, and typosquatting features."""
 import re
 import math
+import sys
 import urllib.parse
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from ml.features.obfuscation import decode_url, detect_obfuscation_signals  # noqa: E402
+from ml.features.typosquatting import check_typosquatting  # noqa: E402
+from shared.url_utils import normalize_url  # noqa: E402
 
 
 URL_SHORTENERS = frozenset([
@@ -45,7 +55,12 @@ FEATURE_ORDER = [
     "tilde_in_path", "hex_in_domain", "redirect_double_slash",
     "domain_digit_count", "url_shortener_flag", "brand_count",
     "num_dots_in_path", "query_length", "fragment_present", "multi_subdomain",
+    "obfuscation_signal_count", "has_at_misdirect", "decode_changed_url",
+    "typosquat_distance", "is_typosquatting",
 ]
+
+# Distances above this carry no signal — every unrelated domain lands far away.
+_TYPOSQUAT_DISTANCE_CAP = 10
 
 
 def _shannon_entropy(s: str) -> float:
@@ -57,7 +72,14 @@ def _shannon_entropy(s: str) -> float:
 
 
 class URLFeatureExtractor:
-    def extract(self, url: str) -> dict[str, Any]:
+    def extract(self, raw_url: str) -> dict[str, Any]:
+        # Lexical features come from the normalized URL so training and serving
+        # see identical vectors; obfuscation signals come from the raw URL,
+        # which still carries the userinfo and encoding that normalization strips.
+        url = normalize_url(raw_url)
+        obfuscation_signals = detect_obfuscation_signals(raw_url)
+        typosquat = check_typosquatting(urllib.parse.urlparse(url).netloc.split(":")[0])
+
         parsed = urllib.parse.urlparse(url)
         domain = parsed.netloc.lower().replace("www.", "")
         # Strip port from domain string
@@ -101,6 +123,11 @@ class URLFeatureExtractor:
             "query_length": len(query),
             "fragment_present": bool(parsed.fragment),
             "multi_subdomain": 1 if len(parts) > 3 else 0,
+            "obfuscation_signal_count": len(obfuscation_signals),
+            "has_at_misdirect": "at_sign_misdirect" in obfuscation_signals,
+            "decode_changed_url": decode_url(raw_url) != raw_url,
+            "typosquat_distance": min(typosquat["edit_distance"], _TYPOSQUAT_DISTANCE_CAP),
+            "is_typosquatting": typosquat["is_typosquatting"],
         }
 
     def to_vector(self, features: dict[str, Any]) -> np.ndarray:

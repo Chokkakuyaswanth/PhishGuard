@@ -1,22 +1,27 @@
-"""Base model plus calibrated fusion and validation-derived thresholds."""
+"""Base model, probability calibration, and out-of-sample decision thresholds."""
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import precision_recall_curve
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
-from cti.mock_adapters import MockVirusTotalAdapter, MockURLhausAdapter, MockWHOISAdapter
+from ml.features.extractor import FEATURE_ORDER
 
 ARTIFACT_DIR = Path(__file__).parent / "artifacts"
+
+# Thresholds are picked on a 50/50 balanced set, but production traffic is
+# overwhelmingly legitimate. Clamping keeps a very separable model from
+# selecting an operating point (~0.03) that flags anything off pure zero.
+_MIN_SUSPICIOUS_THRESHOLD = 0.50
+_MAX_SUSPICIOUS_THRESHOLD = 0.95
 
 
 def build_pipeline() -> Pipeline:
@@ -49,80 +54,79 @@ def train_base_model(X_train: np.ndarray, y_train: np.ndarray) -> Pipeline:
     return pipeline
 
 
-async def _collect_cti_scores(urls: list[str]) -> np.ndarray:
-    adapters = [MockVirusTotalAdapter(), MockURLhausAdapter(), MockWHOISAdapter()]
-    rows = []
-    for url in urls:
-        results = await asyncio.gather(*(adapter.lookup(url) for adapter in adapters))
-        by_source = {response.source: response for response in results}
-        rows.append([
-            by_source["virustotal"].score,
-            by_source["urlhaus"].score,
-            by_source["whois"].score,
-        ])
-    return np.array(rows, dtype=float)
+def _pick_threshold(
+    y_true: np.ndarray,
+    scores: np.ndarray,
+    target_precision: float,
+    floor: float,
+    ceiling: float,
+) -> float:
+    """Highest-recall threshold meeting target_precision, clamped to a sane operating range."""
+    precision, recall, thresholds = precision_recall_curve(y_true, scores)
+    chosen, chosen_recall = None, -1.0
+    fallback, fallback_f1 = 0.5, -1.0
+
+    for p, r, threshold in zip(precision[1:], recall[1:], thresholds):
+        if p + r > 0:
+            f1 = 2 * p * r / (p + r)
+            if f1 > fallback_f1:
+                fallback_f1, fallback = f1, float(threshold)
+        if p >= target_precision and r > chosen_recall:
+            chosen, chosen_recall = float(threshold), float(r)
+
+    return float(min(max(chosen if chosen is not None else fallback, floor), ceiling))
 
 
 def fit_calibrated_bundle(
     base_model: Pipeline,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    urls_val: list[str],
     X_test: np.ndarray,
     y_test: np.ndarray,
-    urls_test: list[str],
 ) -> tuple[dict[str, object], dict[str, float], dict[str, object], dict[str, float]]:
-    val_base_prob = base_model.predict_proba(X_val)[:, 1]
-    test_base_prob = base_model.predict_proba(X_test)[:, 1]
+    # The calibrator and the thresholds must not come from the same rows, or the
+    # precision-recall curve is drawn from in-sample fits and reads optimistically.
+    X_cal, X_thr, y_cal, y_thr = train_test_split(
+        X_val, y_val, test_size=0.5, stratify=y_val, random_state=42
+    )
 
-    val_cti = asyncio.run(_collect_cti_scores(urls_val))
-    test_cti = asyncio.run(_collect_cti_scores(urls_test))
+    calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    calibrator.fit(base_model.predict_proba(X_cal)[:, 1], y_cal)
 
-    val_meta_X = np.column_stack([val_base_prob, val_cti])
-    test_meta_X = np.column_stack([test_base_prob, test_cti])
+    thr_score = calibrator.predict(base_model.predict_proba(X_thr)[:, 1])
+    test_score = calibrator.predict(base_model.predict_proba(X_test)[:, 1])
 
-    combiner = LogisticRegression(max_iter=1000, random_state=42)
-    combiner.fit(val_meta_X, y_val)
+    suspicious_threshold = _pick_threshold(
+        y_thr, thr_score, 0.98, _MIN_SUSPICIOUS_THRESHOLD, _MAX_SUSPICIOUS_THRESHOLD
+    )
+    malicious_threshold = _pick_threshold(
+        y_thr, thr_score, 0.995, max(suspicious_threshold, 0.80), 0.99
+    )
 
-    val_score = combiner.predict_proba(val_meta_X)[:, 1]
-    test_score = combiner.predict_proba(test_meta_X)[:, 1]
-
-    precision, recall, thresholds = precision_recall_curve(y_val, val_score)
-    target_precision = 0.98
-    chosen_threshold = None
-    chosen_recall = -1.0
-    fallback_threshold = 0.5
-    fallback_f1 = -1.0
-
-    for p, r, threshold in zip(precision[1:], recall[1:], thresholds):
-        if p + r > 0:
-            f1 = 2 * p * r / (p + r)
-            if f1 > fallback_f1:
-                fallback_f1 = f1
-                fallback_threshold = float(threshold)
-        if p >= target_precision and r >= chosen_recall:
-            chosen_threshold = float(threshold)
-            chosen_recall = float(r)
-
-    suspicious_threshold = chosen_threshold if chosen_threshold is not None else fallback_threshold
-    safe_threshold = float(max(0.05, min(suspicious_threshold * 0.5, 0.45)))
-    thresholds_cfg = {"safe": round(safe_threshold, 4), "suspicious": round(float(suspicious_threshold), 4)}
+    thresholds_cfg = {
+        "suspicious": round(suspicious_threshold, 4),
+        "malicious": round(malicious_threshold, 4),
+        "safe": round(min(suspicious_threshold * 0.5, 0.45), 4),
+    }
 
     bundle = {
         "base_model": base_model,
-        "combiner": combiner,
+        "calibrator": calibrator,
         "thresholds": thresholds_cfg,
-        "feature_order": None,
-        "version": "calibrated-bundle-v1",
+        "decision_thresholds": {
+            "suspicious": thresholds_cfg["suspicious"],
+            "malicious": thresholds_cfg["malicious"],
+        },
+        "feature_order": list(FEATURE_ORDER),
+        "version": "calibrated-isotonic-v2",
     }
 
-    metadata = {
-        "val_score": val_score,
-        "test_score": test_score,
-        "test_cti": test_cti,
-        "val_cti": val_cti,
+    metadata = {"thr_score": thr_score, "test_score": test_score}
+    return bundle, thresholds_cfg, metadata, {
+        "safe": thresholds_cfg["safe"],
+        "suspicious": suspicious_threshold,
+        "malicious": malicious_threshold,
     }
-    return bundle, thresholds_cfg, metadata, {"safe": safe_threshold, "suspicious": suspicious_threshold}
 
 
 def save_model(bundle: dict[str, object], name: str = "phishguard_model.joblib") -> Path:

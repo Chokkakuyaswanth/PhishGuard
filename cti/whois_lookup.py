@@ -2,6 +2,7 @@
 import asyncio
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 import time
@@ -10,7 +11,12 @@ import whois
 from cti.base import BaseCTIAdapter, CTIResponse, CTIStatus
 
 _IP_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
-_WHOIS_TIMEOUT = 12.0
+_WHOIS_TIMEOUT = 5.0
+
+# Cancelling the awaiting coroutine does not stop the underlying blocking call,
+# so WHOIS threads outlive their scan. On the shared default executor they
+# starve loop.getaddrinfo and every DNS lookup times out behind them.
+_WHOIS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="whois")
 
 
 class WHOISAdapter(BaseCTIAdapter):
@@ -31,9 +37,9 @@ class WHOISAdapter(BaseCTIAdapter):
             )
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             w = await asyncio.wait_for(
-                loop.run_in_executor(None, whois.whois, domain),
+                loop.run_in_executor(_WHOIS_EXECUTOR, whois.whois, domain),
                 timeout=_WHOIS_TIMEOUT,
             )
 

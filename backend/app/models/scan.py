@@ -58,6 +58,11 @@ class URLFeatures(BaseModel):
     query_length: int
     fragment_present: bool
     multi_subdomain: int
+    obfuscation_signal_count: int
+    has_at_misdirect: bool
+    decode_changed_url: bool
+    typosquat_distance: int
+    is_typosquatting: bool
 
 
 class ProviderEvidence(BaseModel):
@@ -74,6 +79,7 @@ class CTIResult(BaseModel):
     virustotal: Optional[ProviderEvidence] = None
     urlhaus: Optional[ProviderEvidence] = None
     whois: Optional[ProviderEvidence] = None
+    dns: Optional[ProviderEvidence] = None
     enriched: bool = False
 
 

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import ScanRecord
@@ -26,6 +26,9 @@ class DBService:
             explanation_json=json.dumps(result.explanation),
             cti_json=json.dumps(result.cti.model_dump() if result.cti else {}),
             features_json=json.dumps(result.features.model_dump() if result.features else {}),
+            scan_mode=result.scan_mode.value if isinstance(result.scan_mode, ScanMode) else str(result.scan_mode),
+            model_version=result.evidence.ml.model_version if result.evidence else None,
+            thresholds_json=json.dumps(result.evidence.ml.thresholds if result.evidence else {}),
             source=result.source,
             scanned_at=result.scanned_at or datetime.now(timezone.utc),
         )
@@ -34,6 +37,17 @@ class DBService:
         await self.session.refresh(record)
         result.id = record.id
         return result
+
+    async def get_stats(self) -> dict:
+        """Aggregate counts over every scan — the dashboard cannot derive these from a page."""
+        stmt = select(ScanRecord.level, func.count(ScanRecord.id)).group_by(ScanRecord.level)
+        rows = (await self.session.execute(stmt)).all()
+
+        by_level = {level: 0 for level in ("no_threat_detected", "suspicious", "malicious", "unknown")}
+        for level, count in rows:
+            by_level[_normalize_level(level).value] = by_level.get(_normalize_level(level).value, 0) + count
+
+        return {"total": sum(by_level.values()), "by_level": by_level}
 
     async def get_history(self, limit: int = 50, offset: int = 0) -> List[ScanResult]:
         stmt = (
@@ -57,7 +71,11 @@ def _record_to_result(r: ScanRecord) -> ScanResult:
     cti = _coerce_cti_result(cti_data) if cti_data else None
     level = _normalize_level(r.level)
     evidence = ScanEvidence(
-        ml=MLEvidence(score=r.ml_probability),
+        ml=MLEvidence(
+            score=r.ml_probability,
+            model_version=r.model_version,
+            thresholds=json.loads(r.thresholds_json or "{}"),
+        ),
         cti=cti,
     ) if cti else None
 
@@ -68,16 +86,23 @@ def _record_to_result(r: ScanRecord) -> ScanResult:
         risk_score=r.score,
         level=level,
         verdict=level,
-        scan_mode=_infer_scan_mode(cti),
+        scan_mode=_stored_scan_mode(r, cti),
         ml_probability=r.ml_probability,
         features=features,
         cti=cti,
         evidence=evidence,
         indicators=indicators,
         explanation=json.loads(r.explanation_json or "[]"),
-        scanned_at=r.scanned_at,
+        scanned_at=_as_utc(r.scanned_at),
         source=r.source,
     )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """SQLite has no native tz type, so timestamps read back naive — they are always UTC."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
 
 
 def _coerce_cti_result(cti_data: dict) -> CTIResult:
@@ -85,6 +110,7 @@ def _coerce_cti_result(cti_data: dict) -> CTIResult:
         virustotal=_coerce_provider_evidence("virustotal", cti_data.get("virustotal")),
         urlhaus=_coerce_provider_evidence("urlhaus", cti_data.get("urlhaus")),
         whois=_coerce_provider_evidence("whois", cti_data.get("whois")),
+        dns=_coerce_provider_evidence("dns", cti_data.get("dns")),
         enriched=bool(cti_data.get("enriched")),
     )
 
@@ -110,13 +136,21 @@ def _normalize_level(raw_level: str) -> RiskLevel:
     return RiskLevel(raw_level)
 
 
+def _stored_scan_mode(record: ScanRecord, cti: CTIResult | None) -> ScanMode:
+    """Prefer the mode recorded at scan time; older rows predate the column."""
+    try:
+        return ScanMode(record.scan_mode)
+    except (ValueError, TypeError):
+        return _infer_scan_mode(cti)
+
+
 def _infer_scan_mode(cti: CTIResult | None) -> ScanMode:
     if cti is None:
         return ScanMode.ML_ONLY
 
     statuses = [
         provider.status
-        for provider in (cti.virustotal, cti.urlhaus, cti.whois)
+        for provider in (cti.virustotal, cti.urlhaus, cti.whois, cti.dns)
         if provider is not None
     ]
     if not statuses:

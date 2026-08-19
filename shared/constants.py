@@ -1,6 +1,6 @@
+# Fallback risk bands. The live thresholds are learned during training and
+# stored in the model bundle; DecisionEngine reads those, not these.
 RISK_THRESHOLDS = {"safe": 0.30, "suspicious": 0.65}
-
-RISK_WEIGHTS = {"ml": 0.40, "virustotal": 0.30, "urlhaus": 0.20, "whois": 0.10}
 
 # Must match URLFeatureExtractor.FEATURE_ORDER exactly
 FEATURE_ORDER = [
@@ -12,6 +12,8 @@ FEATURE_ORDER = [
     "tilde_in_path", "hex_in_domain", "redirect_double_slash",
     "domain_digit_count", "url_shortener_flag", "brand_count",
     "num_dots_in_path", "query_length", "fragment_present", "multi_subdomain",
+    "obfuscation_signal_count", "has_at_misdirect", "decode_changed_url",
+    "typosquat_distance", "is_typosquatting",
 ]
 
 HIGH_RISK_TLDS = frozenset([

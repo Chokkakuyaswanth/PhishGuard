@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import ReactDOM from 'react-dom/client'
-import type { ScanResult } from './api'
+import type { ScanResult, StoredScan } from './api'
 
 type Level = ScanResult['verdict']
 
@@ -25,7 +25,7 @@ function isScannable(url: string): boolean {
 }
 
 function Popup() {
-  const [result, setResult]     = useState<ScanResult | null>(null)
+  const [result, setResult]     = useState<StoredScan | null>(null)
   const [pending, setPending]   = useState(false)
   const [tabId, setTabId]       = useState<number | null>(null)
   const [tabUrl, setTabUrl]     = useState<string>('')
@@ -64,14 +64,19 @@ function Popup() {
     if (!tabId || !tabUrl || rescanning || !isScannable(tabUrl)) return
     setRescanning(true)
     setResult(null)
-    // Call API directly, bypassing the in-memory cache in api.ts
+    // Call API directly, bypassing the session cache in api.ts
+    const started = performance.now()
     try {
       const resp = await fetch('http://localhost:8000/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: tabUrl, source: 'extension' }),
       })
-      const fresh = resp.ok ? await resp.json() : null
+      const elapsed = Math.round(performance.now() - started)
+      const body = resp.ok ? await resp.json() : null
+      const fresh: StoredScan | null = body
+        ? { ...body, timing: { total_ms: elapsed, fetch_ms: elapsed, cached: false } }
+        : null
       await chrome.storage.local.set({ [`scan_${tabId}`]: fresh ?? undefined })
       setResult(fresh)
     } catch {
@@ -140,6 +145,14 @@ function Popup() {
                 {result.indicators.length}
               </div>
             </div>
+            {result.timing && (
+              <div>
+                <div style={{ color: '#8b949e' }}>Response</div>
+                <div style={{ color: result.timing.total_ms < 500 ? '#3fb950' : '#d29922', fontWeight: 700, fontSize: 22 }}>
+                  {result.timing.total_ms}<span style={{ fontSize: 12 }}>ms</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Indicators */}
@@ -174,8 +187,13 @@ function Popup() {
         </div>
       ) : null}
 
-      <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px solid #21262d', color: '#30363d', fontSize: 10, textAlign: 'right' }}>
-        PhishGuard v1.0.0
+      <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px solid #21262d', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10 }}>
+        <span style={{ color: result?.timing ? (result.timing.total_ms < 500 ? '#3fb950' : '#d29922') : '#30363d' }}>
+          {result?.timing
+            ? `${result.timing.total_ms} ms${result.timing.cached ? ' · cached' : ''}`
+            : ''}
+        </span>
+        <span style={{ color: '#30363d' }}>PhishGuard v1.0.0</span>
       </div>
     </div>
   )

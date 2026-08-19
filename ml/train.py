@@ -107,6 +107,11 @@ def _evaluate_scores(y_true: np.ndarray, y_prob: np.ndarray, threshold: float) -
         "recall": round(float(recall_score(y_true, y_pred)), 4),
         "f1": round(float(f1_score(y_true, y_pred)), 4),
         "roc_auc": round(float(roc_auc_score(y_true, y_prob)), 4),
+        # The deployed threshold is tuned for precision, which costs accuracy.
+        # Report the balanced-threshold figure too so the trade-off is visible
+        # rather than hidden behind a single headline number.
+        "accuracy_at_balanced_threshold": round(float(accuracy_score(y_true, (y_prob >= 0.5).astype(int))), 4),
+        "operating_threshold": round(float(threshold), 4),
         "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
         "classification_report": classification_report(y_true, y_pred, target_names=["legitimate", "phishing"], output_dict=True),
     }
@@ -140,6 +145,41 @@ def _audit_bias(urls: list[str], y_true: np.ndarray, y_prob: np.ndarray, thresho
     return {"by_tld": summarize(tld_buckets), "by_keyword_bucket": summarize(keyword_buckets)}
 
 
+# Well-known legitimate URLs at a range of path depths. In-distribution test
+# accuracy cannot catch a dataset whose legitimate half is all bare domains;
+# this can, so a model that fails it never reaches disk.
+KNOWN_GOOD_URLS = [
+    "https://www.google.com",
+    "https://mail.google.com",
+    "https://github.com/torvalds/linux",
+    "https://en.wikipedia.org/wiki/Phishing",
+    "https://www.bbc.co.uk/news",
+    "https://stackoverflow.com/questions/12345/how-do-i-parse-a-url",
+    "https://www.amazon.com/dp/B08N5WRWNW",
+    "https://www.iitg.ac.in",
+    "https://docs.python.org/3/library/asyncio.html",
+    "https://www.nytimes.com/section/world",
+]
+
+
+def _smoke_test_known_good(bundle: dict, threshold: float) -> dict:
+    extractor = URLFeatureExtractor()
+    base_model, calibrator = bundle["base_model"], bundle["calibrator"]
+    X = np.array([extractor.to_vector(extractor.extract(u)) for u in KNOWN_GOOD_URLS])
+    scores = calibrator.predict(base_model.predict_proba(X)[:, 1])
+    failed = [
+        {"url": url, "score": round(float(score), 4)}
+        for url, score in zip(KNOWN_GOOD_URLS, scores)
+        if score >= threshold
+    ]
+    return {
+        "total": len(KNOWN_GOOD_URLS),
+        "threshold": round(float(threshold), 4),
+        "max_score": round(float(scores.max()), 4),
+        "failed": failed,
+    }
+
+
 def main() -> None:
     log.info("=== PhishGuard ML Training Pipeline ===")
 
@@ -160,10 +200,12 @@ def main() -> None:
         X, y, urls = generate_synthetic_data()
         log.info(f"Synthetic data: {len(y):,} samples, {X.shape[1]} features")
 
-    X_train, X_holdout, y_train, y_holdout = train_test_split(X, y, test_size=0.3, stratify=y, random_state=42)
+    # 60 % train / 40 % held out; the holdout splits evenly into a calibration
+    # set and a test set the model never sees during threshold selection.
+    X_train, X_holdout, y_train, y_holdout = train_test_split(X, y, test_size=0.4, stratify=y, random_state=42)
     X_val, X_test, y_val, y_test = train_test_split(X_holdout, y_holdout, test_size=0.5, stratify=y_holdout, random_state=42)
-    urls_train, urls_holdout = train_test_split(urls, test_size=0.3, stratify=y, random_state=42)
-    val_urls, test_urls = train_test_split(urls_holdout, test_size=0.5, stratify=y_holdout, random_state=42)
+    _, urls_holdout = train_test_split(urls, test_size=0.4, stratify=y, random_state=42)
+    _, test_urls = train_test_split(urls_holdout, test_size=0.5, stratify=y_holdout, random_state=42)
 
     log.info(f"Train: {len(y_train):,}  |  Val: {len(y_val):,}  |  Test: {len(y_test):,}")
 
@@ -171,13 +213,7 @@ def main() -> None:
     base_model = train_base_model(X_train, y_train)
 
     bundle, thresholds_cfg, metadata, threshold_detail = fit_calibrated_bundle(
-        base_model,
-        X_val,
-        y_val,
-        val_urls,
-        X_test,
-        y_test,
-        test_urls,
+        base_model, X_val, y_val, X_test, y_test
     )
 
     metrics = _evaluate_scores(y_test, metadata["test_score"], threshold_detail["suspicious"])
@@ -188,6 +224,17 @@ def main() -> None:
         log.warning(f"Accuracy {metrics['accuracy']:.2%} is below the 95% target!")
     else:
         log.info(f"Target met: accuracy = {metrics['accuracy']:.2%}")
+
+    smoke = _smoke_test_known_good(bundle, threshold_detail["suspicious"])
+    metrics["known_good_smoke_test"] = smoke
+    if smoke["failed"]:
+        log.error(
+            f"Known-good smoke test FAILED — {len(smoke['failed'])}/{smoke['total']} "
+            f"popular legitimate URLs were flagged: {smoke['failed']}"
+        )
+        log.error("Refusing to save the model. The training set is likely unrepresentative.")
+        sys.exit(1)
+    log.info(f"Known-good smoke test passed ({smoke['total']}/{smoke['total']} clean)")
 
     model_path = save_model(bundle)
     log.info(f"Model bundle saved → {model_path}")

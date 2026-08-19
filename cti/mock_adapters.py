@@ -78,3 +78,22 @@ class MockWHOISAdapter(BaseCTIAdapter):
                 "mock": True,
             },
         )
+
+
+class MockDNSAdapter(BaseCTIAdapter):
+    async def lookup(self, url: str) -> CTIResponse:
+        rng = _rng(url, "dns")
+        resolves = rng.random() > 0.05
+        address_count = rng.randint(1, 4) if resolves else 0
+        return CTIResponse(
+            source="dns",
+            status=CTIStatus.MOCK,
+            hit=not resolves,
+            score=0.0 if resolves else 0.85,
+            details={
+                "resolved": resolves,
+                "address_count": address_count,
+                "addresses": [f"192.0.2.{rng.randint(1, 254)}" for _ in range(address_count)],
+                "mock": True,
+            },
+        )

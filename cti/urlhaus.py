@@ -1,6 +1,7 @@
 """URLhaus (abuse.ch) adapter — no API key required."""
 import httpx
 import time
+from cti.http_client import get_client
 from cti.base import BaseCTIAdapter, CTIResponse, CTIStatus
 
 URLHAUS_API = "https://urlhaus-api.abuse.ch/v1/url/"
@@ -20,8 +21,8 @@ class URLhausAdapter(BaseCTIAdapter):
     async def lookup(self, url: str) -> CTIResponse:
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=12.0) as client:
-                resp = await client.post(URLHAUS_API, data={"url": url})
+            client = await get_client()
+            resp = await client.post(URLHAUS_API, data={"url": url}, timeout=8.0)
             data = resp.json()
             in_db = data.get("query_status") == "is_db"
             threat = data.get("threat") or ""
